@@ -30,6 +30,22 @@ limitations section states what was not.
   Both VMs on the same libvirt NAT network 192.168.122.0/24.
 ```
 
+## Repository layout
+
+```
+conf/
+  outputs.conf    forwarder output to the indexer
+  inputs.conf     forwarder monitored log files
+searches/
+  baseline.spl    baseline search over the forwarded data
+  detection.spl   SYN flood detection search
+  syn-flood-alert.savedsearch.conf   the saved alert stanza, exported from the indexer
+evidence/
+  baseline.png            flat timechart before the attack
+  detection-event.png     the kernel SYN-cookie event in Splunk
+  triggered-alert.png     the alert's Trigger History, fired instances
+```
+
 ## Environment
 
 | Component | Detail |
@@ -93,7 +109,7 @@ sudo /opt/splunkforwarder/bin/splunk enable boot-start -user root -systemd-manag
 
 ### outputs.conf
 
-`/opt/splunkforwarder/etc/system/local/outputs.conf`
+`/opt/splunkforwarder/etc/system/local/outputs.conf` (see `conf/outputs.conf`)
 
 ```
 [tcpout]
@@ -107,7 +123,7 @@ server = 192.168.122.38:9997
 
 ### inputs.conf
 
-`/opt/splunkforwarder/etc/system/local/inputs.conf`
+`/opt/splunkforwarder/etc/system/local/inputs.conf` (see `conf/inputs.conf`)
 
 ```
 [default]
@@ -183,11 +199,15 @@ address.
 
 ### Baseline search
 
+`searches/baseline.spl`
+
 ```
 index=main host=rhel9-stig* | timechart span=1m count by sourcetype
 ```
 
 ### Detection search
+
+`searches/detection.spl`
 
 ```
 index=main host=rhel9-stig* "Possible SYN flooding"
@@ -195,16 +215,18 @@ index=main host=rhel9-stig* "Possible SYN flooding"
 
 ### Alert
 
-Saved as a scheduled alert `SYN Flood Detected - rhel9-stig`:
+Saved as a scheduled alert `SYN Flood Detected - rhel9-stig`. The exported
+stanza is in `searches/syn-flood-alert.savedsearch.conf`. Its actual settings:
 
 - Schedule: cron `*/1 * * * *` (every minute)
-- Time range: Last 5 minutes
-- Trigger: Number of Results is greater than 0
-- Throttle: 60 seconds
-- Action: Add to Triggered Alerts, severity High
+- Time range: beginning of today to now (`dispatch.earliest_time = @d`, `dispatch.latest_time = now`)
+- Trigger: number of events greater than 0 (`counttype = number of events`, `relation = greater than`, `quantity = 0`)
+- Throttle: none (`alert.suppress = 0`)
+- Severity: High (`alert.severity = 4`)
+- Action: Add to Triggered Alerts (`alert.track = 1`)
 
 Confirmed firing end to end: re-ran the flood, the scheduled search ran within a
-minute, and the alert populated Trigger History (see evidence).
+minute, and the alert populated Trigger History (see `evidence/triggered-alert.png`).
 
 ### Detection logic and false-positive profile
 
@@ -219,11 +241,9 @@ closed port (no listening socket, no queue, no message).
 
 | File | Shows |
 |---|---|
-| `baseline.png` | Flat event timechart before the attack |
-| `hping-flood.png` | hping3 sending the SYN flood from the host |
-| `half-open.png` | `ss` SYN-RECV count pinned during the flood |
-| `detection-event.png` | Splunk search returning the kernel SYN-cookie event |
-| `triggered-alert.png` | Alert Trigger History, fired instances |
+| `evidence/baseline.png` | Flat event timechart before the attack |
+| `evidence/detection-event.png` | Splunk search returning the kernel SYN-cookie event |
+| `evidence/triggered-alert.png` | Alert Trigger History, fired instances |
 
 ## Reproduction
 
@@ -247,9 +267,11 @@ closed port (no listening socket, no queue, no message).
 - Thresholds are lab-only. The alert triggers on a single cookie message
   (count greater than 0); production would require sustained or correlated
   signal.
-- The 60-second throttle against a 60-second schedule and a 5-minute window
-  causes the alert to fire on consecutive minutes while one event ages out of
-  the window. Production would widen the throttle or narrow the window.
+- The alert searches from the start of the current day (`dispatch.earliest_time =
+  @d`) with no throttle (`alert.suppress = 0`), so once a SYN-cookie event is in
+  today's range the every-minute schedule re-fires continuously for the rest of
+  the day. Production would use a short rolling window (for example the last 5
+  minutes) and enable throttling so one flood yields one alert.
 - Detection is binary (message present or absent), not a measured SYN rate. It
   relies on the kernel engaging SYN cookies, which the STIG baseline enables.
   The kernel rate-limits the message, so a sustained flood logs it only
@@ -264,4 +286,3 @@ closed port (no listening socket, no queue, no message).
   IP-based forwarding and local package install (`--disablerepo` / `rpm`).
 - The Enterprise Trial license lasts 60 days. After that it reverts to Free,
   where alerting is disabled; the alert must be re-licensed to keep firing.
-```
